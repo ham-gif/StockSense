@@ -1,0 +1,50 @@
+name: monitor
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"      # backup starter
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        type: boolean
+        default: false
+
+concurrency:
+  group: monitor
+  cancel-in-progress: false
+
+permissions:
+  actions: write
+  contents: read
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: |
+          pip install -r requirements.txt
+          playwright install --with-deps chromium
+
+      - name: Dry run
+        if: ${{ inputs.dry_run }}
+        run: python -u combined_monitor.py --dry-run --once
+
+      - name: Monitor
+        if: ${{ !inputs.dry_run }}
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: timeout 20400 python -u combined_monitor.py || true
+
+      - name: Start next run
+        if: ${{ !inputs.dry_run && always() }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run monitor.yml
