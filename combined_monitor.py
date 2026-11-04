@@ -39,28 +39,22 @@ ERROR_DETAIL_MARKERS = (
 GYFTR_URL = "https://www.gyftr.com/sony-playstation"
 ROOTER_URL = "https://shop.rooter.gg/product/playstation-gift-cards"
 BLINKIT_URL = "https://blinkit.com/prn/sony-playstation-instant-voucher/prid/698590"
-STANSHOP_URL = "https://www.stanshop.co/playstation-psn-gift-card-in-india"
-DIGISTORE_URL = "https://digistore.co.in/product-category/console-games/playstation-card/"
-SWAG_URL = "https://www.swag.gg/gift-cards/playstation"
+WOOHOO_URL = "https://www.woohoo.in/playstation-e-gift-instant-voucher"
+KRGKART_URL = "https://krgkart.com/product-price/playstation-gift-card/"
+KRGKART_DENOMINATIONS = (1000, 2000, 3000, 4000, 5000)
+KRGKART_RETRY_SECONDS = 300
+KRGKART_USER_AGENT = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                      "(KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36")
 ALERTS_PER_RESTOCK = 1          # notifications sent before the cooldown starts
 ALERT_COOLDOWN_SECONDS = 300    # default pause after notifications before alerting again
 SITE_COOLDOWN_SECONDS = {       # per-site overrides, keyed by site name
-    "StanShop": 3 * 3600,       # 3 hour timer after an alert
-}
-# Sites whose timer is reset by a genuine restock. If the item is seen out of stock
-# while the timer is active and then comes back, it must be detected as available
-# on this many consecutive checks before a new alert is sent (guards against false
-# alerts); the alert then restarts the timer. Sites not listed here keep the normal
-# behaviour: nothing is sent while their timer is running.
-# GamesTheShop is deliberately not listed: it alerts on its very first detection.
-RESTOCK_RESET_CONFIRMATIONS = {
-    "StanShop": 2,
+    "Woohoo": 3600,
 }
 
 # Memory management for long sessions. With CHECK_INTERVAL = 20s, 30 cycles is
 # roughly 10 minutes and 180 cycles roughly an hour.
 PAGE_RECYCLE_CYCLES = 30        # close and reopen every tab (frees leaked JS heap/DOM)
-BROWSER_RECYCLE_CYCLES = 180    # also recreate the browser context
+BROWSER_RECYCLE_CYCLES = 180    # also recreate the browser context and KRGKart's Chrome
 CHROMIUM_ARGS = [
     "--disable-gpu",
     "--disable-extensions",
@@ -72,7 +66,6 @@ CHROMIUM_ARGS = [
 GAMES_THE_SHOP = {
     1000: "https://www.gamestheshop.com/product/2153a461-7203-4802-aac4-283be4c775d3?variant=09df672e-b598-4b2d-9b3e-e1ca1dd9d205",
     2000: "https://www.gamestheshop.com/product/d117bc23-1c4b-4330-b7f3-f90c71d9a5b3?variant=cb05d659-beac-47d7-85ff-8bfed95f47cf",
-    3000: "https://www.gamestheshop.com/product/f528de33-a760-4fea-9b04-3d150b24a116?variant=7e6631a0-0d65-4907-89b7-4ab5e24397cc",
 }
 
 
@@ -103,91 +96,8 @@ def rooter_tile_state(lines, amount):
     return None, "voucher tile not found"
 
 
-def stanshop_tile_state(texts):
-    """Read one denomination tile from StanShop's variant selector.
-
-    Each tile is a link whose text starts with a badge: "SOLD OUT" when empty,
-    or a discount badge such as "5% OFF" when orderable. `texts` holds the text
-    of every visible link for that denomination. Returns (available, detail);
-    available is None when unsure.
-    """
-    if not texts:
-        return None, "denomination tile not found"
-    states = set()
-    for text in texts:
-        lowered = text.lower()
-        if re.search(r"\b(sold out|out of stock)\b", lowered):
-            states.add(False)
-        elif re.search(r"\b(unavailable|not available|coming soon|notify)\b", lowered):
-            states.add(None)
-        else:
-            states.add(True)
-    if states == {False}:
-        return False, "tile says SOLD OUT"
-    if states == {True}:
-        return True, "tile shows no sold-out marker"
-    return None, "tile state is ambiguous"
-
-
-def digistore_card_state(cards, amount):
-    """Read one denomination's product card from Digistore's category page.
-
-    `cards` holds dicts with title, text, hasCart and hasPrice for each visible
-    product card. Out-of-stock cards carry an "Out of Stock" label; orderable
-    ones show a price and/or an add-to-cart control. Returns (available, detail);
-    available is None when unsure.
-    """
-    pattern = re.compile(rf"\brs\.?\s*{amount}\b", re.I)
-    matches = [card for card in cards
-               if pattern.search(card["title"]) and re.search(r"psn|playstation", card["title"], re.I)]
-    if not matches:
-        return None, "product card not found"
-    if len(matches) > 1:
-        return None, "product card is ambiguous"
-    card = matches[0]
-    text = card["text"].lower()
-    if re.search(r"\b(out of stock|sold out)\b", text):
-        return False, "product card says Out of Stock"
-    if re.search(r"\b(coming soon|notify|unavailable|read more)\b", text) and not card["hasCart"]:
-        return None, "product card shows a non-orderable state"
-    if card["hasCart"] or card["hasPrice"]:
-        return True, "product card shows no out-of-stock marker"
-    return None, "product card state is ambiguous"
-
-
-def swag_state(lines, amount):
-    """Read one denomination from Swag's PlayStation page (lowercased visible lines).
-
-    The page shows a single "Out of stock" / "Notify me" block when nothing can be
-    bought. Only a standalone purchase button counts as a buy control; the word
-    "buy" inside descriptions, FAQs or links must never count. Returns
-    (available, detail); available is None when unsure.
-    """
-    if not any("playstation" in line for line in lines):
-        return None, "PlayStation product not identified"
-    buy_control = re.compile(r"(add to cart|buy now|buy|add to bag|proceed to checkout)")
-    buy_line = next((line for line in lines if buy_control.fullmatch(line)), None)
-    has_buy = buy_line is not None
-    page_out = any(re.fullmatch(r"(out of stock|notify me)", line) for line in lines)
-    if page_out:
-        # An "Out of stock" / "Notify me" block always wins: the page's header card
-        # also shows a "₹1000" graphic and other controls that must not count.
-        return False, "page says out of stock"
-    tile = re.compile(rf"(?:₹|rs\.?\s*){amount}(?:\.0+)?(?:\s.*)?")
-    tile_index = None
-    for i, line in enumerate(lines):
-        flat = line.replace(",", "")
-        if len(flat) <= 25 and tile.fullmatch(flat):
-            tile_index = i
-            break
-    if tile_index is None:
-        return None, "denomination tile not found"
-    nearby = " ".join(lines[tile_index:tile_index + 4])
-    if re.search(r"\b(out of stock|sold out|unavailable|notify me)\b", nearby):
-        return False, "denomination tile says out of stock"
-    if has_buy:
-        return True, f"denomination tile '{lines[tile_index]}' and buy control '{buy_line}' are shown"
-    return None, "no buy control found for the denomination"
+class KRGKartBrowserUnavailable(Exception):
+    pass
 
 
 def _timestamp():
@@ -249,16 +159,22 @@ class CombinedMonitor:
         self.alert_delivered = {}
         self.alert_counts = {}
         self.alert_cooldown_until = {}
-        self.went_out_during_timer = {}   # key -> seen out of stock while its timer was active
-        self.restock_confirmations = {}   # key -> consecutive available checks since that
         self.cycles_completed = 0
         self.error_count = 0
         self.check_semaphore = asyncio.Semaphore(MAX_CONCURRENT_CHECKS)
+        self.krg_browser = None
+        self.krg_context = None
+        self.krg_page = None
+        self.krg_retry_after = 0.0
 
     @staticmethod
     def _configure_page(page):
         page.set_default_timeout(PAGE_TIMEOUT_MS)
         page.set_default_navigation_timeout(NAVIGATION_TIMEOUT_MS)
+
+    def _defer_krg_retry(self):
+        """Back off KRGKart browser launches for KRGKART_RETRY_SECONDS."""
+        self.krg_retry_after = asyncio.get_running_loop().time() + KRGKART_RETRY_SECONDS
 
     async def route_nonessential_resources(self, route):
         if route.request.resource_type in {"image", "media", "font"}:
@@ -270,6 +186,8 @@ class CombinedMonitor:
         """Navigate idle tabs to about:blank so each site's DOM and JS heap can be
         garbage-collected while the monitor waits for the next cycle."""
         pages = list(self.pages.values())
+        if self.krg_page is not None:
+            pages.append(self.krg_page)
 
         async def park(page):
             try:
@@ -284,6 +202,9 @@ class CombinedMonitor:
         """Close every tab; they are reopened lazily by the next checks."""
         pages = list(self.pages.values())
         self.pages.clear()
+        if self.krg_page is not None:
+            pages.append(self.krg_page)
+            self.krg_page = None
         for page in pages:
             try:
                 await page.close()
@@ -291,8 +212,10 @@ class CombinedMonitor:
                 pass
 
     async def recycle_browser(self):
-        """Throw away the browser context (cache, cookies, service workers)."""
+        """Throw away the browser context (cache, cookies, service workers) and
+        KRGKart's separate Chrome, which relaunches on its next check."""
         await self.recycle_pages()
+        await self.close_krg_browser()
         if self.browser is None:
             return
         old_context = self.browser_context
@@ -375,30 +298,6 @@ class CombinedMonitor:
             cooldown_until = self.alert_cooldown_until.get(key)
             if cooldown_until is not None:
                 if now < cooldown_until:
-                    needed = RESTOCK_RESET_CONFIRMATIONS.get(site)
-                    if needed and self.went_out_during_timer.get(key):
-                        # Went out of stock during the timer and is back: only alert
-                        # once it has been detected as available enough times in a row.
-                        confirmations = self.restock_confirmations.get(key, 0) + 1
-                        self.restock_confirmations[key] = confirmations
-                        if confirmations < needed:
-                            self.states[key] = "available"
-                            print(f"⏳ {site} ₹{amount}: back in stock, confirming ({confirmations}/{needed})")
-                            return
-                        if await self.alert(key, site, amount, url,
-                                            f"Back in stock, confirmed on {needed} consecutive checks"):
-                            self.alert_delivered.pop(key, None)
-                            self.alert_attempted.add(key)
-                            self.states[key] = "alerted"
-                            cooldown = SITE_COOLDOWN_SECONDS.get(site, ALERT_COOLDOWN_SECONDS)
-                            self.alert_cooldown_until[key] = now + cooldown
-                            self.went_out_during_timer.pop(key, None)
-                            self.restock_confirmations.pop(key, None)
-                            print(f"🔔 {site} ₹{amount}: restock confirmed, timer reset ({cooldown // 60} min)")
-                        else:
-                            # Keep the confirmations so delivery is retried next check.
-                            self.error_count += 1
-                        return
                     remaining = int(cooldown_until - now)
                     self.states[key] = "alerted"
                     print(f"⏸ {site} ₹{amount}: alert cooldown, {remaining}s remaining")
@@ -406,8 +305,6 @@ class CombinedMonitor:
                 # Cooldown finished and it is still in stock: start a new round.
                 del self.alert_cooldown_until[key]
                 self.alert_counts[key] = 0
-                self.went_out_during_timer.pop(key, None)
-                self.restock_confirmations.pop(key, None)
             if self.alert_counts.get(key, 0) < ALERTS_PER_RESTOCK:
                 if await self.alert(key, site, amount, url, detection):
                     self.alert_delivered.pop(key, None)
@@ -424,14 +321,8 @@ class CombinedMonitor:
         else:
             self.alert_attempted.discard(key)
             self.alert_delivered.pop(key, None)
-            if site in RESTOCK_RESET_CONFIRMATIONS:
-                cooldown_until = self.alert_cooldown_until.get(key)
-                if cooldown_until is not None and asyncio.get_running_loop().time() < cooldown_until:
-                    # Remember the dip; any partial confirmation streak starts over.
-                    self.went_out_during_timer[key] = True
-                    self.restock_confirmations[key] = 0
             # alert_counts and alert_cooldown_until are deliberately kept, so going
-            # out of stock does not reset the alert limit or the cooldown by itself.
+            # out of stock does not reset the two-alert limit or the cooldown.
             print(f"🔴 {site} ₹{amount}: unavailable")
 
     async def record_all(self, site, amounts, url, result, detail):
@@ -537,6 +428,70 @@ class CombinedMonitor:
                               "denomination not found" if not found else
                               "no explicit stock signal near the denomination" if available is None else "")
 
+    async def check_woohoo(self):
+        page = await self.load("Woohoo", WOOHOO_URL)
+        try:
+            # The denomination options render client-side; reading too early made
+            # the check report UNKNOWN. Polling returns as soon as they appear.
+            await page.wait_for_function("""() => {
+              const visible = el => !!(el && el.getClientRects().length);
+              return !!document.querySelector(
+                  '#desktop-denomination-section .desktop-view__denomination__slabs, #mobile-denomination-slabs-slider .swiper-wrapper')
+                || [...document.querySelectorAll('button')].some(b => visible(b) && /out of stock|add to cart/i.test(b.innerText || ''));
+            }""", timeout=5000, polling=250)
+        except PlaywrightTimeoutError:
+            pass
+        snapshot = await page.evaluate("""() => {
+          const text = el => (el?.innerText || '').replace(/\\s+/g, ' ').trim();
+          const visible = el => !!(el && el.getClientRects().length);
+          const add = [...document.querySelectorAll('button')].find(b => visible(b) && /add to cart/i.test(text(b) + ' ' + (b.getAttribute('aria-label') || '')));
+          const oos = [...document.querySelectorAll('button')].some(b => visible(b) && /out of stock/i.test(text(b) + ' ' + (b.getAttribute('aria-label') || '')))
+            || [...document.querySelectorAll('button.product-fixed-second-cta--out-of-stock')].some(visible);
+          const denominationSectionPresent = !!document.querySelector('#desktop-denomination-section, #mobile-denomination-section');
+          const optionContainerPresent = !!document.querySelector('#desktop-denomination-section .desktop-view__denomination__slabs, #mobile-denomination-slabs-slider .swiper-wrapper');
+          const roots = [
+            ...document.querySelectorAll('#desktop-denomination-section .desktop-view__denomination__slabs > *, #mobile-denomination-slabs-slider .swiper-wrapper > *')
+          ].filter(visible);
+          const options = roots.map(el => ({
+            text: text(el),
+            disabled: !!el.disabled || el.getAttribute('aria-disabled') === 'true' || /disabled/i.test(el.className || ''),
+            selected: el.getAttribute('aria-pressed') === 'true' || el.getAttribute('aria-selected') === 'true' ||
+              [...(typeof el.className === 'string' ? el.className : '').split(/\\s+/)].some(name => /(?:^|[-_])(?:selected|active)$/i.test(name))
+          })).filter(option => option.text);
+          return { product: /playstation e-gift card/i.test(document.body.innerText), addEnabled: !!add && !add.disabled && add.getAttribute('aria-disabled') !== 'true', oos, options, denominationSectionPresent, optionContainerPresent };
+        }""")
+
+        if not snapshot["product"]:
+            await self.record_all("Woohoo", DENOMINATIONS, WOOHOO_URL, None, "PlayStation product not identified")
+            return
+
+        if snapshot["oos"]:
+            await self.record_all("Woohoo", DENOMINATIONS, WOOHOO_URL, False, "product-level Out of Stock control")
+            return
+
+        # Strip thousands separators once so "1,000" matches 1000.
+        normalised = [(option, option["text"].replace(",", "")) for option in snapshot["options"]]
+        for amount in DENOMINATIONS:
+            amount_pattern = re.compile(rf"(?<!\d){amount}(?!\d)")
+            option = next((opt for opt, text in normalised if amount_pattern.search(text)), None)
+            result = None
+            detail = "denomination state not exposed by the page"
+            if option is not None:
+                option_text = option["text"].lower()
+                if "out of stock" in option_text or "sold out" in option_text:
+                    result, detail = False, "denomination is marked out of stock"
+                elif option["disabled"]:
+                    detail = "denomination is exposed but not selectable"
+                elif option["selected"] and snapshot["addEnabled"]:
+                    result, detail = True, "exposed denomination selected and Add to Cart enabled"
+                else:
+                    result, detail = None, "denomination is exposed but an enabled purchase state is not confirmed"
+            elif snapshot["options"]:
+                result, detail = False, "requested denomination is not among the exposed options"
+            elif snapshot["denominationSectionPresent"] and snapshot["optionContainerPresent"]:
+                result, detail = False, "denomination options are absent in the sold-out product state"
+            await self.record(f"Woohoo:{amount}", "Woohoo", amount, WOOHOO_URL, result, detail)
+
     async def check_gamestheshop(self, amount, url):
         key = f"GamesTheShop:{amount}"
         page = await self.load(key, url)
@@ -566,103 +521,204 @@ class CombinedMonitor:
             result, detail = None, f"unrecognised availability value '{availability}'"
         await self.record(key, "GamesTheShop", amount, url, result, detail if result is None or result else "")
 
-    async def check_stanshop(self):
-        page = await self.load("StanShop", STANSHOP_URL)
+    async def check_krgkart(self):
         try:
-            # The variant tiles can render after hydration; wait until all are present.
-            await page.wait_for_function("""amounts => amounts.every(a =>
-              document.querySelector(`a[href*="playstation-psn-gift-card-in-india-${a}-inr"]`))""",
-                                         arg=list(DENOMINATIONS), timeout=8000, polling=250)
-        except PlaywrightTimeoutError:
-            # Missing tiles are reported as UNKNOWN below.
-            pass
-
-        async def read_states():
-            tiles = await page.evaluate("""amounts => {
+            await self.reset_krg_if_disconnected()
+            if self.krg_browser is None:
+                if asyncio.get_running_loop().time() < self.krg_retry_after:
+                    await self.record_all("KRGKart", KRGKART_DENOMINATIONS, KRGKART_URL, None,
+                                          "browser launch retry backoff")
+                    return
+                await self._start_krg_browser()
+            if self.krg_page is None or self.krg_page.is_closed():
+                self.krg_page = await self.krg_context.new_page()
+                self._configure_page(self.krg_page)
+            page = self.krg_page
+            response = await page.goto(KRGKART_URL, wait_until="domcontentloaded",
+                                       timeout=NAVIGATION_TIMEOUT_MS)
+            if response is not None and response.status >= 500:
+                # Transient or filter-triggered server error: wait briefly and retry once.
+                await page.wait_for_timeout(3000)
+                response = await page.goto(KRGKART_URL, wait_until="domcontentloaded",
+                                           timeout=NAVIGATION_TIMEOUT_MS)
+            await page.wait_for_timeout(1200)
+            if response is not None and response.status >= 400:
+                try:
+                    body = (await response.text())[:300].replace("\n", " ")
+                except Exception:
+                    body = "<unreadable>"
+                print(f"KRGKart: HTTP {response.status} | server={response.headers.get('server')} "
+                      f"| cf-ray={response.headers.get('cf-ray')} | body={body}")
+            if response is None or response.status >= 400:
+                detail = ("category page returned no HTTP response" if response is None
+                          else f"category page returned HTTP {response.status}")
+                await self.record_all("KRGKart", KRGKART_DENOMINATIONS, KRGKART_URL, None, detail)
+                return
+            snapshot = await page.evaluate("""() => {
               const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
               const visible = el => !!(el && el.getClientRects().length &&
                 getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none');
-              const out = {};
-              for (const a of amounts) {
-                out[a] = [...document.querySelectorAll(`a[href*="playstation-psn-gift-card-in-india-${a}-inr"]`)]
-                  .filter(visible).map(el => norm(el.innerText));
-              }
-              return out;
-            }""", list(DENOMINATIONS))
-            return {amount: stanshop_tile_state(tiles.get(str(amount), [])) for amount in DENOMINATIONS}
-
-        states = await read_states()
-        if any(result is True for result, _ in states.values()):
-            # Confirm after a short pause so a tile that rendered a moment before
-            # its "SOLD OUT" badge does not trigger a false alert.
-            await page.wait_for_timeout(800)
-            states = await read_states()
-        for amount, (result, detail) in states.items():
-            await self.record(f"StanShop:{amount}", "StanShop", amount, STANSHOP_URL, result, detail)
-
-    async def check_digistore(self):
-        page = await self.load("Digistore", DIGISTORE_URL)
-        try:
-            # Wait for the product grid to render before reading it.
-            await page.wait_for_selector(".product", timeout=8000)
-        except PlaywrightTimeoutError:
-            # An empty grid is reported as UNKNOWN below.
-            pass
-
-        async def read_states():
-            cards = await page.evaluate("""() => {
-              const norm = s => (s || '').replace(/\\s+/g, ' ').trim();
-              const visible = el => !!(el && el.getClientRects().length &&
-                getComputedStyle(el).visibility !== 'hidden' && getComputedStyle(el).display !== 'none');
-              return [...document.querySelectorAll('.product')]
-                .filter(card => !card.querySelector('.product') && visible(card))
-                .map(card => {
-                  const titleEl = card.querySelector('h2, h3, h4, h5, h6, .woocommerce-loop-product__title');
-                  const text = norm(card.innerText);
-                  return {
-                    title: norm(titleEl?.innerText || ''),
-                    text,
-                    hasCart: !!card.querySelector(
-                      'a.add_to_cart_button, a[href*="add-to-cart"], button[name="add-to-cart"]'),
-                    hasPrice: /₹\\s*[\\d,]+/.test(text),
-                  };
+              const heading = norm(document.querySelector('h1')?.innerText || document.title);
+              const securityPage = /just a moment|security check|verify you are human|checking your browser|access denied|cloudflare/i.test(
+                heading + ' ' + norm(document.body?.innerText || '').slice(0, 1200));
+              const cards = [...document.querySelectorAll('.product')].filter(visible).map(card => {
+                const titleEl = card.querySelector('h2, h3, .product-title, .woocommerce-loop-product__title');
+                const title = norm(titleEl?.innerText || '');
+                const stockElements = [...card.querySelectorAll('.stock, .availability, [class*="stock"]')].filter(visible);
+                const stockText = stockElements.map(el => norm(el.innerText)).filter(Boolean).join(' ');
+                const controls = [...card.querySelectorAll('a, button, input[type="submit"]')].filter(el => {
+                  const label = norm(el.innerText || el.value || el.getAttribute('aria-label') || '');
+                  return visible(el) && /^add to cart$/i.test(label);
                 });
+                return {title, text: norm(card.innerText), stockText, addCount: controls.length,
+                  addUsable: controls.length === 1 && !controls[0].disabled &&
+                    controls[0].getAttribute('aria-disabled') !== 'true' &&
+                    !/disabled/i.test(controls[0].className || '')};
+              });
+              return {heading, securityPage, cards};
             }""")
-            return {amount: digistore_card_state(cards, amount) for amount in DENOMINATIONS}
+        except KRGKartBrowserUnavailable as exc:
+            print(f"KRGKart: BROWSER_UNAVAILABLE - {exc}")
+            await self.record_all("KRGKart", KRGKART_DENOMINATIONS, KRGKART_URL, None,
+                                  "Google Chrome could not be launched")
+            return
+        except Exception as exc:
+            print(f"KRGKart: PAGE_FAILURE - {type(exc).__name__}: {exc}")
+            await self.reset_krg_if_disconnected()
+            await self.record_all("KRGKart", KRGKART_DENOMINATIONS, KRGKART_URL, None,
+                                  f"category page unreachable ({type(exc).__name__})")
+            return
 
-        states = await read_states()
-        if any(result is True for result, _ in states.values()):
-            # Confirm after a short pause so a card that rendered a moment before
-            # its "Out of Stock" label does not trigger a false alert.
-            await page.wait_for_timeout(800)
-            states = await read_states()
-        for amount, (result, detail) in states.items():
-            await self.record(f"Digistore:{amount}", "Digistore", amount, DIGISTORE_URL, result, detail)
+        if snapshot["securityPage"] or "playstation" not in snapshot["heading"].lower():
+            reason = "security page shown" if snapshot["securityPage"] else "PlayStation category not identified"
+            if snapshot["securityPage"]:
+                print("KRGKart: SECURITY_CHALLENGE - stock remains UNKNOWN")
+            await self.record_all("KRGKart", KRGKART_DENOMINATIONS, KRGKART_URL, None, reason)
+            return
 
-    async def check_swag(self):
-        page = await self.load("Swag", SWAG_URL)
+        for amount in KRGKART_DENOMINATIONS:
+            amount_pattern = re.compile(rf"\brs\.?\s*{amount}\b", re.I)
+            matches = [card for card in snapshot["cards"]
+                       if "playstation" in card["title"].lower() and amount_pattern.search(card["title"])]
+            if len(matches) != 1:
+                result, detail = None, "matching PlayStation product card not found or ambiguous"
+            else:
+                card = matches[0]
+                stock_text = card["stockText"].lower()
+                card_text = card["text"].lower()
+                if re.search(r"\bout of stock\b", stock_text or card_text):
+                    result, detail = False, "product card explicitly says Out of Stock"
+                elif (re.search(r"\bin stock\b|\bavailable\b", stock_text)
+                      and card["addCount"] == 1 and card["addUsable"]):
+                    result, detail = True, "product card shows in-stock state and usable Add to cart control"
+                else:
+                    result, detail = None, "product stock state or Add to cart control is ambiguous"
+            await self.record(f"KRGKart:{amount}", "KRGKart", amount, KRGKART_URL, result, detail)
+
+    @staticmethod
+    def _krg_headless():
+        """Set KRGKART_HEADED=1 to run KRGKart's Chrome with a visible window."""
+        return os.getenv("KRGKART_HEADED", "").lower() not in {"1", "true", "yes"}
+
+    @staticmethod
+    def _krg_args():
+        return CHROMIUM_ARGS + ["--disable-blink-features=AutomationControlled"]
+
+    async def _start_krg_browser(self):
+        if self.playwright is None:
+            self._defer_krg_retry()
+            raise KRGKartBrowserUnavailable("Playwright is unavailable")
+
+        explicit_path = os.getenv("KRGKART_BROWSER_PATH") or os.getenv("KRGKART_CHROME_PATH")
+        attempts = []
+        selected_label = None
         try:
-            # The page is client-rendered; wait for either the stock banner or a buy control.
-            await page.wait_for_function(
-                "() => /out of stock|notify me|add to cart|buy now/i.test(document.body?.innerText || '')",
-                timeout=8000, polling=250)
-        except PlaywrightTimeoutError:
-            # Missing content is reported as UNKNOWN below.
-            pass
+            if explicit_path:
+                attempts.append("explicit executable")
+                try:
+                    self.krg_browser = await self.playwright.chromium.launch(
+                        executable_path=explicit_path, headless=self._krg_headless(),
+                        args=self._krg_args()
+                    )
+                    selected_label = "explicit executable (headless)"
+                except Exception:
+                    self._defer_krg_retry()
+                    raise KRGKartBrowserUnavailable("tried explicit executable only")
+            else:
+                for channel, label in (("chrome", "chrome (headless)"), ("msedge", "msedge (headless)")):
+                    attempts.append(f"channel {channel}")
+                    try:
+                        self.krg_browser = await self.playwright.chromium.launch(
+                            channel=channel, headless=self._krg_headless(),
+                            args=self._krg_args()
+                        )
+                        selected_label = label
+                        break
+                    except Exception:
+                        continue
 
-        async def read_states():
-            text = await page.locator("body").inner_text()
-            lines = [line.strip().lower() for line in text.splitlines() if line.strip()]
-            return {amount: swag_state(lines, amount) for amount in DENOMINATIONS}
+                if self.krg_browser is None:
+                    self._defer_krg_retry()
+                    raise KRGKartBrowserUnavailable("tried " + ", ".join(attempts))
 
-        states = await read_states()
-        if any(result is True for result, _ in states.values()):
-            # Confirm after a short pause so a page that rendered a moment before
-            # its "Out of stock" label does not trigger a false alert.
-            await page.wait_for_timeout(800)
-            states = await read_states()
-        for amount, (result, detail) in states.items():
-            await self.record(f"Swag:{amount}", "Swag", amount, SWAG_URL, result, detail)
+            # KRGKart rejects the stock headless fingerprint (HTTP 500), so it gets a
+            # realistic browser identity and loads all resources normally.
+            self.krg_context = await self.krg_browser.new_context(
+                user_agent=KRGKART_USER_AGENT,
+                locale="en-IN",
+                timezone_id="Asia/Kolkata",
+                viewport={"width": 1366, "height": 768},
+                extra_http_headers={"Accept-Language": "en-IN,en;q=0.9"},
+            )
+            await self.krg_context.add_init_script(
+                "Object.defineProperty(navigator, 'webdriver', {get: () => undefined});"
+            )
+            self.krg_page = await self.krg_context.new_page()
+            self._configure_page(self.krg_page)
+            print(f"KRGKart: using {selected_label}")
+        except KRGKartBrowserUnavailable:
+            await self.close_krg_browser()
+            raise
+        except Exception as exc:
+            await self.close_krg_browser()
+            self._defer_krg_retry()
+            raise KRGKartBrowserUnavailable(
+                f"browser initialized incompletely; tried {', '.join(attempts) or 'browser setup'} "
+                f"({type(exc).__name__})"
+            ) from exc
+
+    async def close_krg_browser(self):
+        page, context, browser = self.krg_page, self.krg_context, self.krg_browser
+        self.krg_page = None
+        self.krg_context = None
+        self.krg_browser = None
+        errors = []
+        for name, resource in (("page", page), ("context", context), ("browser", browser)):
+            if resource is None:
+                continue
+            try:
+                if name == "page" and resource.is_closed():
+                    continue
+                if name == "browser" and not resource.is_connected():
+                    continue
+                await resource.close()
+            except Exception:
+                errors.append(name)
+        return errors
+
+    async def reset_krg_if_disconnected(self):
+        if self.krg_browser is not None and not self.krg_browser_is_connected():
+            if await self.close_krg_browser():
+                print("⚠️ KRGKart: browser cleanup warning after disconnect")
+            self._defer_krg_retry()
+
+    def krg_browser_is_connected(self):
+        if self.krg_browser is None:
+            return False
+        try:
+            return self.krg_browser.is_connected()
+        except Exception:
+            return False
 
     def _mark_check_failed(self, keys):
         self.error_count += 1
@@ -702,13 +758,12 @@ class CombinedMonitor:
             ("GyFTR", self.check_gyftr, [f"GyFTR:{n}" for n in DENOMINATIONS]),
             ("Rooter", self.check_rooter, [f"Rooter:{n}" for n in DENOMINATIONS]),
             ("Blinkit", self.check_blinkit, [f"Blinkit:{n}" for n in DENOMINATIONS]),
-            ("StanShop", self.check_stanshop, [f"StanShop:{n}" for n in DENOMINATIONS]),
-            ("Digistore", self.check_digistore, [f"Digistore:{n}" for n in DENOMINATIONS]),
-            ("Swag", self.check_swag, [f"Swag:{n}" for n in DENOMINATIONS]),
+            ("Woohoo", self.check_woohoo, [f"Woohoo:{n}" for n in DENOMINATIONS]),
+            ("KRGKart", self.check_krgkart, [f"KRGKart:{n}" for n in KRGKART_DENOMINATIONS]),
         ]
         checks.extend((f"GamesTheShop ₹{amount}", lambda a=amount, u=url: self.check_gamestheshop(a, u),
                        [f"GamesTheShop:{amount}"])
-                      for amount, url in GAMES_THE_SHOP.items() if url)
+                      for amount, url in GAMES_THE_SHOP.items())
         # Limit concurrent navigation/DOM work to reduce resource spikes while
         # still checking independent sites in parallel.
         await asyncio.gather(*(self.guarded(name, check, keys) for name, check, keys in checks))
@@ -740,9 +795,6 @@ async def main(once=False, dry_run=False):
         _credentials()
     print("PlayStation voucher combined monitor")
     print_discord_status()
-    for amount, url in GAMES_THE_SHOP.items():
-        if not url:
-            print(f"⚠️ GamesTheShop ₹{amount}: no URL set, skipping (see GAMES_THE_SHOP).")
     if dry_run:
         print("Read-only dry run: no cart clicks or Telegram messages.")
     else:
@@ -762,7 +814,8 @@ async def main(once=False, dry_run=False):
                 elapsed = asyncio.get_running_loop().time() - started
                 await asyncio.sleep(max(1, CHECK_INTERVAL - elapsed))
         finally:
-            for name, close in (("Browser context", monitor.browser_context.close),
+            for name, close in (("KRGKart", monitor.close_krg_browser),
+                                ("Browser context", monitor.browser_context.close),
                                 ("Browser", browser.close)):
                 try:
                     await close()
