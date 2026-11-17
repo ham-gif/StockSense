@@ -273,10 +273,15 @@ def discord_webhooks():
     return urls
 
 
-def send_discord_to(webhook_url, message, number=1):
+def send_discord_to(webhook_url, message, number=1, ping_everyone=False):
     # Errors name the webhook by number, never by URL (the URL is a secret).
-    _post(f"Discord webhook {number}", webhook_url,
-          json={"content": message, "allowed_mentions": {"parse": []}})
+    # Pings are suppressed unless ping_everyone is set, which is only used for
+    # restock alerts.
+    payload = {"content": message, "allowed_mentions": {"parse": []}}
+    if ping_everyone:
+        payload["content"] = f"@everyone\n{message}"
+        payload["allowed_mentions"] = {"parse": ["everyone"]}
+    _post(f"Discord webhook {number}", webhook_url, json=payload)
 
 
 def send_discord(message):
@@ -462,7 +467,7 @@ class CombinedMonitor:
         pending = [(n, url) for n, url in enumerate(webhooks, 1) if f"discord:{n}" not in delivered]
         if pending:
             results = await asyncio.gather(
-                *(asyncio.to_thread(send_discord_to, url, message, n) for n, url in pending),
+                *(asyncio.to_thread(send_discord_to, url, message, n, True) for n, url in pending),
                 return_exceptions=True)
             for (n, _), result in zip(pending, results):
                 if isinstance(result, Exception):
